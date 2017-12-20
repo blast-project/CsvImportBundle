@@ -1,7 +1,6 @@
 <?php
 
 /*
- *
  * Copyright (C) 2015-2017 Libre Informatique
  *
  * This file is licenced under the GNU LGPL v3.
@@ -13,10 +12,7 @@ namespace Blast\Bundle\CsvImportBundle\Normalizer;
 
 use Blast\Bundle\CsvImportBundle\Converter\NameConverter;
 use Blast\Bundle\CsvImportBundle\Mapping\MappingConfiguration;
-// use Sil\Bundle\VarietyBundle\Entity\Family;
-// use Sil\Bundle\VarietyBundle\Entity\Genus;
-// use Sil\Bundle\VarietyBundle\Entity\Species;
-// use Sil\Bundle\VarietyBundle\Entity\Variety;
+use Doctrine\ORM\EntityManager;
 use Symfony\Component\Serializer\Normalizer\ObjectNormalizer as BaseObjectNormalizer;
 
 /**
@@ -25,19 +21,26 @@ use Symfony\Component\Serializer\Normalizer\ObjectNormalizer as BaseObjectNormal
 class ObjectNormalizer extends BaseObjectNormalizer
 {
     /**
-     * @var array //MappingConfiguration
+     * @var MappingConfiguration
      */
-    private $mapping;
+    private $mappingConf;
 
     /**
      * @var NameConverter
      */
     private $converter;
 
-    public function __construct(MappingConfiguration $mappingConf, NameConverter $nameConverter)
+    /**
+     * @var EntityManager
+     */
+    protected $em;
+
+    public function __construct(EntityManager $em, MappingConfiguration $mappingConf, NameConverter $nameConverter)
     {
         parent::__construct(null, $nameConverter);
-        $this->mapping = $this->getMappings();
+        $this->em = $em;
+        $this->mappingConf = $mappingConf->getMapping();
+        //$this->mapping = $this->getAssociationMapping();
         $this->converter = $nameConverter;
     }
 
@@ -49,10 +52,12 @@ class ObjectNormalizer extends BaseObjectNormalizer
         $this->converter->configureNames($class);
         $object = parent::denormalize($data, $class, $format, $context);
 
-        $rc = new \ReflectionClass($class);
-        if (method_exists($this, 'postDenormalize' . $rc->getShortName())) {
-            $this->{'postDenormalize' . $rc->getShortName()}($object);
-        }
+        /* @todo: find if it is usefull to enable this */
+        /*
+          $rc = new \ReflectionClass($class);
+          if (method_exists($this, 'postDenormalize' . $rc->getShortName())) {
+          $this->{'postDenormalize' . $rc->getShortName()}($object);
+          }*/
 
         return $object;
     }
@@ -63,17 +68,21 @@ class ObjectNormalizer extends BaseObjectNormalizer
     protected function setAttributeValue($object, $attribute, $value, $format = null, array $context = array())
     {
         $this->cleanUpValue($value);
+        $class = get_class($object);
 
-        $key = get_class($object) . '.' . $attribute;
-        if (isset($this->mapping[$key])) {
-            list($associationClass, $field) = $this->mapping[$key];
-            $value = $this->fetchAssociation($associationClass, $field, $value);
+        /* warning bug if there is only one line in the csv file ($attribute is set to 0)*/
+        //var_dump($object, $attribute, $value, $format, $context);
+        if (array_key_exists('associations', $this->mappingConf[$class])) {
+            if (array_key_exists($attribute, $this->mappingConf[$class]['associations'])) {
+                $associationClass = $this->mappingConf[$class]['associations'][$attribute]['entity'];
+                $field = $this->mappingConf[$class]['associations'][$attribute]['target'];
+                $value = $this->fetchAssociation($associationClass, $field, $value);
+            }
         }
 
         if ($value === '') {
             $value = null;
         }
-
         if ($attribute !== '' && $attribute !== null) {
             parent::setAttributeValue($object, $attribute, $value, $format, $context);
         }
@@ -89,17 +98,6 @@ class ObjectNormalizer extends BaseObjectNormalizer
     protected function fetchAssociation($entityClass, $field, $value)
     {
         return $this->em->getRepository($entityClass)->findOneBy([$field => $value]);
-    }
-
-    protected function getMappings()
-    {
-        /* @todo : use association from config file*/
-        return [
-            Genus::class . '.family'           => [Family::class, 'name'],
-            Species::class . '.genus'          => [Genus::class, 'name'],
-            Species::class . '.parent_species' => [Species::class, 'name'],
-            Variety::class . '.species'        => [Species::class, 'name'],
-        ];
     }
 
     protected function cleanUpValue(&$value): void

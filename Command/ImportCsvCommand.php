@@ -1,7 +1,6 @@
 <?php
 
 /*
- *
  * Copyright (C) 2015-2017 Libre Informatique
  *
  * This file is licenced under the GNU LGPL v3.
@@ -51,29 +50,34 @@ class ImportCsvCommand extends ContainerAwareCommand
      */
     protected $importClass = [];
 
+    /**
+     * @var array
+     */
+    protected $codeList = [];
+
     protected function configure()
     {
         $this
-        ->setName('blast:import:csv')
-        ->setDescription('Import data from CSV files into Blast.')
-        ->setDefinition(
-            new InputDefinition([
-            new InputOption(
-                'mapping',
-                'm',
-                InputOption::VALUE_REQUIRED,
-                'The mapping files.',
-                'src/Resources/config/csv_import.yml'
-            ),
-            new InputOption(
-                'dir',
-                'd',
-                InputOption::VALUE_REQUIRED,
-                'The path directory containing the CSV files.',
-                'src/Resources/data'
-            ),
-            ])
-        )
+            ->setName('blast:import:csv')
+            ->setDescription('Import data from CSV files into Blast.')
+            ->setDefinition(
+                new InputDefinition([
+                new InputOption(
+                    'mapping',
+                    'm',
+                    InputOption::VALUE_REQUIRED,
+                    'The mapping files.',
+                    'src/Resources/config/csv_import.yml'
+                ),
+                new InputOption(
+                    'dir',
+                    'd',
+                    InputOption::VALUE_REQUIRED,
+                    'The path directory containing the CSV files.',
+                    'src/Resources/data'
+                ),
+                ])
+            )
 
         ->setHelp(<<<EOT
 The <info>%command.name%</info> command allows user to populate Database with CSV data files.
@@ -89,8 +93,8 @@ EOT
         $this->em = $this->getContainer()->get('doctrine')->getEntityManager();
         $this->dir = $input->getOption('dir');
         $mappingConfig = $this->getContainer()
-               ->get('blast_csv_import.mapping.configuration')
-               ->loadMappingFromFile($input->getOption('mapping'));
+                       ->get('blast_csv_import.mapping.configuration')
+                       ->loadMappingFromFile($input->getOption('mapping'));
         $this->mapping = $mappingConfig->getMapping();
         $this->importClass = $mappingConfig->getImportClass();
         $this->normalizer = $this->getContainer()->get('blast_csv_import.normalizer.object');
@@ -101,12 +105,12 @@ EOT
      */
     protected function execute(InputInterface $input, OutputInterface $output)
     {
-        foreach ($this->importClass as $class) {
-            if (class_exists($class)) {
-                $this->beforeImport($class, $output);
-                $this->importData($class, $output);
+        foreach ($this->importClass as $entityClass) {
+            if (class_exists($entityClass)) {
+                $this->beforeImport($entityClass, $output);
+                $this->importData($entityClass, $output);
             } else {
-                $output->writeln(sprintf('%s does not exist', $class));
+                $output->writeln(sprintf('%s does not exist', $entityClass));
             }
         }
     }
@@ -116,9 +120,11 @@ EOT
      */
     protected function importData($entityClass, OutputInterface $output)
     {
+        $batchSize = 10000;
         $output->write("Importing <info>$entityClass</info>");
         $csv = $this->getCsvFilePath($entityClass);
         $output->write(' (' . basename($csv) . ')...');
+        /** @todo: use $batchSize to load file part by part */
         $data = file_get_contents($csv);
 
         /* @todo: allow import from other format (or not) */
@@ -129,23 +135,42 @@ EOT
 
         $output->writeln(sprintf(' <info>%d objects</info>', count($objects)));
 
-        $rc = new \ReflectionClass($entityClass);
-        $method = 'postDeserialize' . $rc->getShortName();
+        // $rc = new \ReflectionClass($entityClass);
+        // $method = 'postDeserialize' . $rc->getShortName();
 
+        $this->codeList = []; // Init table of code
         foreach ($objects as $k => $object) {
-            if (method_exists($this, $method)) {
-                $this->{$method}($object);
-            }
+            // if (method_exists($this, $method)) {
+            //    $this->{$method}($object);
+            //}
+            $this->postDeserialize($entityClass, $object, $output);
 
             $this->em->persist($object);
 
             // Hum Lol
-            if ($k % 50 == 0) {
+            if ($k % $batchSize == 0) {
                 $this->em->flush();
+                // http://docs.doctrine-project.org/projects/doctrine-orm/en/latest/reference/batch-processing.html
+                // Warning ! Should not do a clear as it detach attached foreign entity (so they are not found on persist)
+                // $this->em->clear();
             }
         }
         $this->em->flush();
+        $this->em->clear();
         $output->writeln('DONE (' . basename($csv) . ')...');
+    }
+
+    protected function postDeserialize($entityClass, $object, OutputInterface $output)
+    {
+        /* @todo: move this to deserialise in normalizer */
+        if (array_key_exists('generators', $this->mapping[$entityClass])) {
+            foreach (keys($this->mapping[$entityClass]['generators']) as $field) {
+                $generator = $this->getContainer()->get($this->mapping[$entityClass]['generators'][$field]);
+                $code = $generator->generate($object, $codeList);
+                $object->set[$field]($code);
+                $codeList[] = $code;
+            }
+        }
     }
 
     /**
@@ -159,9 +184,7 @@ EOT
         }
         if ($doDelete) {
             $output->writeln(sprintf('Delete from %s', $entityClass));
-            $em = $this->getContainer()->get('doctrine')->getEntityManager();
-
-            $em->createQuery('DELETE FROM ' . $entityClass)->execute();
+            $this->em->createQuery('DELETE FROM ' . $entityClass)->execute();
             //$em->createQuery('DELETE FROM :entityClass')->execute(['entityClass', $entityClass]);
         }
     }
